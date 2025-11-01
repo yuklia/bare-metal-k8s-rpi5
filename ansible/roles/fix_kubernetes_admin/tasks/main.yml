@@ -1,0 +1,186 @@
+---
+- name: Fix kubernetes-admin permissions (control-plane only)
+  become: true
+  when: "'control_plane' in group_names or inventory_hostname == 'node1'"
+  block:
+
+    - name: Set common paths
+      set_fact:
+        admin_kubeconfig: /etc/kubernetes/admin.conf
+        cm_kubeconfig: /etc/kubernetes/controller-manager.conf
+        ca_crt: /etc/kubernetes/pki/ca.crt
+        ca_key: /etc/kubernetes/pki/ca.key
+        breakglass_dir: /etc/kubernetes/pki/breakglass
+        breakglass_user: tmp-admin
+        breakglass_kubeconfig: /etc/kubernetes/tmp-admin.kubeconfig
+
+    - name: Ensure openssl is installed
+      apt:
+        name: openssl
+        state: present
+        update_cache: yes
+
+    - name: Ensure admin kubeconfig exists (kubeadm init must have run)
+      stat:
+        path: "{{ admin_kubeconfig }}"
+      register: admin_kcfg_stat
+
+    - name: Abort if admin.conf is missing
+      fail:
+        msg: "Missing {{ admin_kubeconfig }}. Run kubeadm init first."
+      when: not admin_kcfg_stat.stat.exists
+
+    # ---------------- Step 1: Check/repair admin.conf via kubeadm ----------------
+    - name: Does kubernetes-admin cert include system:masters?
+      shell: |
+        set -o pipefail
+        kubectl config view --raw --kubeconfig="{{ admin_kubeconfig }}" -o jsonpath='{.users[?(@.name=="kubernetes-admin")].user.client-certificate-data}' \
+        | base64 -d | openssl x509 -noout -text | grep -q "O = system:masters"
+      register: admin_has_masters
+      changed_when: false
+      failed_when: false
+
+    - name: Backup admin.conf (only if we will regenerate)
+      copy:
+        src: "{{ admin_kubeconfig }}"
+        dest: "{{ admin_kubeconfig }}.bak"
+        remote_src: true
+        mode: '0644'
+      when: admin_has_masters.rc != 0
+      ignore_errors: true
+
+    - name: Regenerate admin.conf with kubeadm if missing system:masters
+      shell: |
+        set -e
+        if [ -f /etc/kubernetes/kubeadm-config.yaml ]; then
+          kubeadm init phase kubeconfig admin --config=/etc/kubernetes/kubeadm-config.yaml
+        else
+          kubeadm init phase kubeconfig admin
+        fi
+        chown root:root "{{ admin_kubeconfig }}"
+        chmod 0644 "{{ admin_kubeconfig }}"
+      when: admin_has_masters.rc != 0
+      register: regen_admin
+      changed_when: regen_admin.rc == 0
+
+    - name: Re-check admin cert for system:masters
+      shell: |
+        set -o pipefail
+        kubectl config view --raw --kubeconfig="{{ admin_kubeconfig }}" -o jsonpath='{.users[?(@.name=="kubernetes-admin")].user.client-certificate-data}' \
+        | base64 -d | openssl x509 -noout -text | grep -q "O = system:masters"
+      register: admin_has_masters_after
+      changed_when: false
+      failed_when: false
+
+    - name: Decide if we need break-glass (boolean)
+      set_fact:
+        needs_breakglass: "{{ (admin_has_masters_after.rc | default(1)) != 0 }}"
+
+    # ---------------- Step 2: Create break-glass kubeconfig (if needed) ----------------
+    - name: Ensure break-glass dir
+      file:
+        path: "{{ breakglass_dir }}"
+        state: directory
+        mode: '0700'
+      when: needs_breakglass
+
+    - name: Generate tmp-admin key
+      shell: openssl genrsa -out "{{ breakglass_dir }}/{{ breakglass_user }}.key" 2048
+      args: { creates: "{{ breakglass_dir }}/{{ breakglass_user }}.key" }
+      when: needs_breakglass
+
+    - name: Generate CSR for CN=tmp-admin,O=system:masters
+      shell: >
+        openssl req -new -key "{{ breakglass_dir }}/{{ breakglass_user }}.key"
+        -subj "/CN={{ breakglass_user }}/O=system:masters"
+        -out "{{ breakglass_dir }}/{{ breakglass_user }}.csr"
+      args: { creates: "{{ breakglass_dir }}/{{ breakglass_user }}.csr" }
+      when: needs_breakglass
+
+    - name: Sign tmp-admin cert with cluster CA
+      shell: >
+        openssl x509 -req -in "{{ breakglass_dir }}/{{ breakglass_user }}.csr"
+        -CA "{{ ca_crt }}" -CAkey "{{ ca_key }}" -CAcreateserial
+        -out "{{ breakglass_dir }}/{{ breakglass_user }}.crt" -days 365
+      args: { creates: "{{ breakglass_dir }}/{{ breakglass_user }}.crt" }
+      when: needs_breakglass
+
+    # Choose API server URL that matches cert SANs (avoid 127.0.0.1)
+    - name: Read API server URL from admin.conf (best-effort)
+      shell: |
+        set -o pipefail
+        kubectl config view --raw --kubeconfig="{{ admin_kubeconfig }}" -o jsonpath='{.clusters[0].cluster.server}'
+      register: apiserver_url
+      changed_when: false
+      failed_when: false
+      when: needs_breakglass
+
+    - name: Compute chosen server URL
+      set_fact:
+        chosen_server_url: "{{ (apiserver_url.stdout | trim) if (apiserver_url is defined and (apiserver_url.stdout | trim) != '') else ('https://' ~ ansible_default_ipv4.address ~ ':6443') }}"
+      when: needs_breakglass
+
+    - name: Write break-glass kubeconfig
+      copy:
+        dest: "{{ breakglass_kubeconfig }}"
+        mode: '0600'
+        content: |
+          apiVersion: v1
+          kind: Config
+          clusters:
+          - name: kubernetes
+            cluster:
+              certificate-authority: {{ ca_crt }}
+              server: {{ chosen_server_url }}
+          contexts:
+          - name: breakglass@kubernetes
+            context:
+              cluster: kubernetes
+              user: {{ breakglass_user }}
+          current-context: breakglass@kubernetes
+          users:
+          - name: {{ breakglass_user }}
+            user:
+              client-certificate: {{ breakglass_dir }}/{{ breakglass_user }}.crt
+              client-key: {{ breakglass_dir }}/{{ breakglass_user }}.key
+      when: needs_breakglass
+
+    # ---------------- Step 3: Ensure CRB (using a kubeconfig with rights) ----------------
+    - name: Check if CRB kubernetes-admin-binding exists
+      shell: kubectl --kubeconfig="{{ admin_kubeconfig }}" get clusterrolebinding kubernetes-admin-binding -o name
+      register: crb_check_admin
+      changed_when: false
+      failed_when: false
+
+    - name: Create CRB with break-glass kubeconfig (only if needed/missing)
+      shell: >
+        kubectl --kubeconfig="{{ breakglass_kubeconfig }}"
+        create clusterrolebinding kubernetes-admin-binding
+        --clusterrole=cluster-admin --user=kubernetes-admin
+      when:
+        - needs_breakglass
+        - crb_check_admin.rc != 0
+      register: crb_create_bg
+      changed_when: crb_create_bg.rc == 0
+      failed_when: crb_create_bg.rc not in [0]
+
+    # ---------------- Step 4: Verify ----------------
+    - name: Verify kubernetes-admin can list nodes
+      shell: kubectl --kubeconfig="{{ admin_kubeconfig }}" auth can-i list nodes
+      register: can_list_nodes
+      changed_when: false
+
+    - name: Assert kubernetes-admin now has permission
+      assert:
+        that:
+          - can_list_nodes.stdout is search("yes")
+        fail_msg: "kubernetes-admin still lacks permissions. Check admin.conf and RBAC."
+
+    - name: Show nodes (debug)
+      shell: kubectl --kubeconfig="{{ admin_kubeconfig }}" get nodes -o wide
+      register: nodes_out
+      changed_when: false
+      failed_when: false
+
+    - debug:
+        var: nodes_out.stdout

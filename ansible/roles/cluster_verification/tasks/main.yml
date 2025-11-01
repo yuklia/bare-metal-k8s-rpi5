@@ -1,0 +1,60 @@
+---
+- name: Check cluster nodes
+  command: kubectl get nodes -o wide
+  become_user: yuklia
+  register: cluster_nodes
+  changed_when: false
+
+- name: Display cluster nodes
+  debug:
+    var: cluster_nodes.stdout_lines
+
+- name: Check cluster pods
+  command: kubectl get pods -A
+  become_user: yuklia
+  register: cluster_pods
+  changed_when: false
+
+- name: Display cluster pods
+  debug:
+    var: cluster_pods.stdout_lines
+
+- name: Check cluster services
+  command: kubectl get svc -A
+  become_user: yuklia
+  register: cluster_services
+  changed_when: false
+
+- name: Display cluster services
+  debug:
+    var: cluster_services.stdout_lines
+
+- name: Check cluster storage classes
+  command: kubectl get storageclass
+  become_user: yuklia
+  register: storage_classes
+  changed_when: false
+
+- name: Display storage classes
+  debug:
+    var: storage_classes.stdout_lines
+
+- name: Verify MetalLB is working
+  command: kubectl get svc -n metallb-system
+  become_user: yuklia
+  register: metallb_services
+  changed_when: false
+
+- name: Display MetalLB services
+  debug:
+    var: metallb_services.stdout_lines
+
+- name: Verify Traefik is working
+  command: kubectl get svc -n traefik
+  become_user: yuklia
+  register: traefik_services
+  changed_when: false
+
+- name: Display Traefik services
+  debug:
+    var: traefik_services.stdout_lines

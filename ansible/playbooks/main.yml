@@ -1,0 +1,47 @@
+---
+- name: Deploy Kubernetes Cluster on Raspberry Pi
+  hosts: all
+  become: true
+  gather_facts: true
+  
+  pre_tasks:
+    - name: Update package cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+  roles:
+    - common
+    - docker
+    - kubernetes
+
+- name: Initialize Kubernetes Control Plane
+  hosts: control_plane
+  become: true
+  
+  roles:
+    - k8s_control_plane
+
+- name: Join Worker Nodes to Cluster
+  hosts: workers
+  become: true
+  
+  roles:
+    - k8s_worker
+
+- name: Deploy Cluster Add-ons
+  hosts: control_plane
+  become: true
+  
+  roles:
+    - metallb
+    - traefik
+    - storage_provisioner
+    - monitoring
+
+- name: Verify Cluster Health
+  hosts: control_plane
+  become: true
+  
+  roles:
+    - cluster_verification

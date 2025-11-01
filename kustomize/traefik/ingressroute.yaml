@@ -1,0 +1,20 @@
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: traefik-dashboard
+  namespace: traefik
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - kind: Rule
+      match: Host(`traefik.192.168.101.11.nip.io`) && (PathPrefix(`/api`) || PathPrefix(`/dashboard`))
+      services:
+        - name: api@internal
+          kind: TraefikService
+    - kind: Rule
+      match: Host(`traefik.local`) && (PathPrefix(`/api`) || PathPrefix(`/dashboard`))
+      services:
+        - name: api@internal
+          kind: TraefikService
+  tls: {}

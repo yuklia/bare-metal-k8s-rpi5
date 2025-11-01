@@ -1,0 +1,56 @@
+---
+- name: Add Helm repository
+  command: helm repo add traefik https://traefik.github.io/charts
+  become_user: yuklia
+  changed_when: false
+
+- name: Update Helm repositories
+  command: helm repo update
+  become_user: yuklia
+  changed_when: false
+
+- name: Create Traefik namespace
+  command: kubectl create namespace traefik
+  become_user: yuklia
+  changed_when: false
+  ignore_errors: yes
+
+- name: Install Traefik with Helm
+  command: helm install traefik traefik/traefik --namespace traefik --set service.type=LoadBalancer --set ingressRoute.dashboard.enabled=true
+  become_user: yuklia
+  changed_when: false
+
+- name: Wait for Traefik to be ready
+  command: kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=traefik -n traefik --timeout=300s
+  become_user: yuklia
+  changed_when: false
+
+- name: Create Traefik dashboard ingress
+  copy:
+    dest: /tmp/traefik-dashboard.yaml
+    content: |
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: traefik-dashboard
+        namespace: traefik
+        annotations:
+          kubernetes.io/ingress.class: traefik
+      spec:
+        rules:
+        - host: traefik.{{ ansible_default_ipv4.network }}.nip.io
+          http:
+            paths:
+            - path: /
+              pathType: Prefix
+              backend:
+                service:
+                  name: traefik
+                  port:
+                    number: 9000
+    mode: '0644'
+
+- name: Apply Traefik dashboard ingress
+  command: kubectl apply -f /tmp/traefik-dashboard.yaml
+  become_user: yuklia
+  changed_when: false

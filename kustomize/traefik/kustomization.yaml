@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: traefik
+
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingressroute.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/name: traefik
+      app.kubernetes.io/part-of: ingress-controller
+    includeSelectors: true
+
+images:
+  - name: traefik
+    newTag: v3.0

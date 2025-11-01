@@ -1,0 +1,16 @@
+---
+- name: Get join command from control plane
+  slurp:
+    src: /tmp/join-command
+  delegate_to: "{{ groups['control_plane'][0] }}"
+  register: join_command
+
+- name: Join worker node to cluster
+  shell: "{{ join_command.content | b64decode }}"
+  changed_when: false
+
+- name: Wait for node to be ready
+  wait_for:
+    timeout: 300
+  delegate_to: "{{ groups['control_plane'][0] }}"
+  become_user: yuklia

@@ -1,0 +1,38 @@
+---
+- name: Create storage namespace
+  command: kubectl create namespace storage
+  become_user: yuklia
+  changed_when: false
+  ignore_errors: yes
+
+- name: Create NFS storage class
+  copy:
+    dest: /tmp/nfs-storage-class.yaml
+    content: |
+      apiVersion: storage.k8s.io/v1
+      kind: StorageClass
+      metadata:
+        name: nfs-storage
+        annotations:
+          storageclass.kubernetes.io/is-default-class: "true"
+      provisioner: k8s-sigs.io/nfs-subdir-external-provisioner
+      parameters:
+        server: {{ synology_nas_ip }}
+        path: /volume1/{{ synology_nas_share }}
+        onDelete: "retain"
+    mode: '0644'
+
+- name: Apply NFS storage class
+  command: kubectl apply -f /tmp/nfs-storage-class.yaml
+  become_user: yuklia
+  changed_when: false
+
+- name: Install NFS subdir external provisioner
+  command: helm install nfs-subdir-external-provisioner k8s-sigs/nfs-subdir-external-provisioner --namespace storage --set nfs.server={{ synology_nas_ip }} --set nfs.path=/volume1/{{ synology_nas_share }}
+  become_user: yuklia
+  changed_when: false
+
+- name: Wait for NFS provisioner to be ready
+  command: kubectl wait --for=condition=ready pod -l app=nfs-subdir-external-provisioner -n storage --timeout=300s
+  become_user: yuklia
+  changed_when: false

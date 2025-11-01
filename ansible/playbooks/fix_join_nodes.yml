@@ -1,0 +1,6 @@
+---
+- name: Fix Worker Nodes Join Issue
+  hosts: workers
+  become: yes
+  roles:
+    - fix_join_nodes

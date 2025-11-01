@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: traefik-config
+  namespace: traefik
+data:
+  traefik.yaml: |
+    # Global configuration
+    global:
+      checkNewVersion: false
+      sendAnonymousUsage: false
+    
+    # Entry points configuration
+    entryPoints:
+      web:
+        address: ":80"
+        http:
+          redirections:
+            entrypoint:
+              to: websecure
+              scheme: https
+      websecure:
+        address: ":443"
+      traefik:
+        address: ":8080"
+    
+    # API and dashboard configuration
+    api:
+      dashboard: true
+      insecure: false
+      debug: false
+
+    # Health endpoint
+    ping:
+      entryPoint: traefik
+    
+    # Certificate resolvers
+    certificatesResolvers:
+      letsencrypt:
+        acme:
+          email: admin@homelab.local
+          storage: /data/acme.json
+          httpChallenge:
+            entryPoint: web
+    
+    # Providers
+    providers:
+      kubernetesCRD:
+        endpoints:
+          - "https://kubernetes.default.svc:443"
+        token: /var/run/secrets/kubernetes.io/serviceaccount/token
+        certAuthFilePath: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        namespaces:
+          - default
+          - traefik
+        ingressClass: traefik
+        labelSelector: environment!=test
+        ingressEndpoint:
+          hostname: "192.168.1.240"
+          ip: "192.168.1.240"
+          publishedService: "traefik/traefik"
+      kubernetesIngress:
+        ingressClass: traefik
+        ingressEndpoint:
+          hostname: "192.168.1.240"
+          ip: "192.168.1.240"
+          publishedService: "traefik/traefik"
+    
+    # Logging
+    log:
+      level: INFO
+      filePath: /var/log/traefik.log
+    
+    # Access log
+    accessLog:
+      filePath: /var/log/access.log
+      format: json

@@ -1,0 +1,82 @@
+# bm-k8s-pi/ansible/roles/k8s_control_plane/tasks/main.yml
+---
+# Check if admin.conf already exists
+- name: Ensure Kubernetes control plane is initialized only once
+  command: kubeadm init --pod-network-cidr={{ kubernetes_pod_subnet }}
+                        --service-cidr={{ kubernetes_service_subnet }}
+                        --apiserver-advertise-address={{ ansible_default_ipv4.address }}
+  # Skip this task entirely if /etc/kubernetes/admin.conf already exists
+  args:
+    creates: /etc/kubernetes/admin.conf
+  register: kubeadm_init
+
+# Create ~/.kube directory for the yuklia user (idempotent by default)
+- name: Create .kube directory for yuklia user
+  file:
+    path: /home/yuklia/.kube
+    state: directory
+    owner: yuklia
+    group: yuklia
+    mode: '0755'
+
+# Copy admin.conf if the control plane is available
+- name: Copy admin.conf to user's kube config
+  copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /home/yuklia/.kube/config
+    remote_src: yes
+    owner: yuklia
+    group: yuklia
+    mode: '0644'
+  when: kubeadm_init is not skipped
+
+# Write out the kubeadm join command only when init actually ran
+- name: Generate join command file
+  shell: kubeadm token create --print-join-command
+  register: join_command_output
+  when: kubeadm_init is not skipped
+
+- name: Write join command to file
+  copy:
+    dest: /tmp/join-command
+    content: "{{ join_command_output.stdout }}"
+    mode: '0644'
+  when: kubeadm_init is not skipped
+
+# Also generate join command if it doesn't exist (for existing clusters)
+- name: Check if join command file exists
+  stat:
+    path: /tmp/join-command
+  register: join_command_file_stat
+
+- name: Generate join command for existing clusters
+  shell: kubeadm token create --print-join-command
+  register: existing_join_command
+  when: 
+    - kubeadm_init is skipped
+    - not join_command_file_stat.stat.exists
+
+- name: Write join command to file for existing clusters
+  copy:
+    dest: /tmp/join-command
+    content: "{{ existing_join_command.stdout }}"
+    mode: '0644'
+  when: 
+    - kubeadm_init is skipped
+    - not join_command_file_stat.stat.exists
+
+- name: Wait for control plane API to be reachable
+  wait_for:
+    host: "{{ ansible_default_ipv4.address }}"
+    port: 6443
+    timeout: 300
+  # become is not required here since it uses the local connection to the remote host
+  delegate_to: node1
+
+- name: Install Flannel CNI
+  command: >
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf
+    apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+    --validate=false
+  become: true
+  changed_when: false

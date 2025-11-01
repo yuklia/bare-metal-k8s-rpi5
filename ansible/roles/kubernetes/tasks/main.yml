@@ -1,0 +1,143 @@
+---
+- name: Derive Kubernetes major.minor
+  set_fact:
+    k8s_minor: "{{ kubernetes_version_repo | regex_replace('^([0-9]+)\\.([0-9]+).*$', '\\1.\\2') }}"
+
+- name: Install Kubernetes GPG key
+  become: true
+  shell: |
+    curl -fsSL https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version_repo }}/deb/Release.key \
+    | gpg --dearmor -o /etc/apt/keyrings/kubernetes.gpg
+  args:
+    creates: /etc/apt/keyrings/kubernetes.gpg
+
+- name: Make Kubernetes GPG key world-readable
+  become: true
+  file:
+    path: /etc/apt/keyrings/kubernetes.gpg
+    mode: '0644'
+
+- name: Add Kubernetes apt repository (Debian bookworm, arm64)
+  become: true
+  apt_repository:
+    repo: "deb [signed-by=/etc/apt/keyrings/kubernetes.gpg] https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version_repo }}/deb/ /"
+    state: present
+    filename: kubernetes
+    update_cache: yes
+
+- name: Get latest kubelet version for {{ k8s_minor }}.*
+  become: true
+  shell: >
+    apt-cache madison kubelet
+    | awk '{print $3}'
+    | grep -E '^{{ k8s_minor | regex_replace('\.','\\.') }}\.'
+    | head -n1
+  register: kubelet_ver
+  changed_when: false
+
+- name: Fail if no kubelet version found for channel {{ k8s_minor }}
+  fail:
+    msg: "No kubelet version found in Apt for channel {{ k8s_minor }} (did you add the correct pkgs.k8s.io repo and run apt update?)"
+  when: kubelet_ver.stdout | trim == ""
+
+- name: Use same exact version
+  set_fact:
+    k8s_exact_version: "{{ kubelet_ver.stdout | trim }}"
+    
+- name: Install Kubernetes packages (pin exact version)
+  become: true
+  apt:
+    name:
+      - "kubelet={{ k8s_exact_version }}"
+      - "kubeadm={{ k8s_exact_version }}"
+      - "kubectl={{ k8s_exact_version }}"
+    state: present
+
+- name: Pin Kubernetes packages
+  copy:
+    dest: /etc/apt/preferences.d/kubernetes
+    content: |
+      Package: kubelet kubeadm kubectl
+      Pin: version {{ k8s_exact_version }}
+      Pin-Priority: 1000
+    mode: '0644'
+
+- name: Start and enable kubelet service
+  systemd:
+    name: kubelet
+    state: started
+    enabled: yes
+    daemon_reload: yes
+
+# - name: Ensure CNI directories exist
+#   file:
+#     path: "{{ item }}"
+#     state: directory
+#     mode: '0755'
+#   loop:
+#     - /opt/cni/bin
+#     - /etc/cni/net.d
+
+# - name: Check if CNI plugins already installed
+#   stat:
+#     path: /opt/cni/bin/loopback
+#   register: cni_loopback
+
+# - name: Download CNI plugins tarball
+#   get_url:
+#     url: "{{ cni_url }}"
+#     dest: /tmp/cni-plugins.tgz
+#     mode: '0644'
+#     force: false          # don't re-download if already there
+#     validate_certs: yes
+#   when: not cni_loopback.stat.exists
+#   retries: 3
+#   delay: 3
+#   register: cni_dl
+#   until: cni_dl is succeeded
+
+# - name: Unpack CNI plugins
+#   unarchive:
+#     src: /tmp/cni-plugins.tgz
+#     dest: /opt/cni/bin
+#     remote_src: true
+#     extra_opts: [ "--no-same-owner" ]
+#   when: not cni_loopback.stat.exists
+#   args:
+#     # unarchive supports creates; guard on a file it will produce
+#     creates: /opt/cni/bin/bridge
+
+# # (optional) Make sure binaries are executable
+# - name: Ensure CNI binaries are executable
+#   file:
+#     path: "{{ item }}"
+#     mode: '0755'
+#   loop:
+#     - /opt/cni/bin/bridge
+#     - /opt/cni/bin/host-local
+#     - /opt/cni/bin/loopback
+#     - /opt/cni/bin/portmap
+#   when: cni_loopback.stat.exists or (cni_dl is defined and cni_dl is succeeded)
+
+# Configure containerd with default runtime and systemd cgroups
+- name: Configure containerd
+  copy:
+    dest: /etc/containerd/config.toml
+    content: |
+      version = 2
+      [plugins."io.containerd.grpc.v1.cri"]
+        [plugins."io.containerd.grpc.v1.cri".containerd]
+          snapshotter = "overlayfs"
+          default_runtime_name = "runc"
+        [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+          runtime_type = "io.containerd.runc.v2"
+          [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+            SystemdCgroup = true
+          [plugins."io.containerd.grpc.v1.cri".cni]
+            bin_dir  = "/opt/cni/bin"
+            conf_dir = "/etc/cni/net.d"
+    mode: "0644"
+
+  notify:
+    - restart containerd
+    - restart kubelet   # safe; kubelet will reconnect to CRI

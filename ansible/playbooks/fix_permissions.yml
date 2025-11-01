@@ -1,0 +1,6 @@
+---
+- name: Permissions
+  hosts: control_plane
+  become: true
+  roles:
+    - fix_kubernetes_admin
